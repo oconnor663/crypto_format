@@ -23,20 +23,21 @@ recipients are given, the default is the sender's own public key.
 For signing, if no private key is given, the default is a random key.
 
 Options:
-    --alphabet=<str>       the alphabet string to index into when armoring
-    -b --binary            don't use saltpack armor
-    --base64               for armor, use the Base64 alphabet and 3-byte blocks
-    --base85               for armor, use the Base85 alphabet and 4-byte blocks
-    --block=<size>         the armoring block size
-    --chunk=<size>         size of payload chunks, default 1 MB
-    -d --detached          make a detached signature
-    --debug                debug mode
-    -m --message=<msg>     message text, instead of reading stdin
-    --raw                  omit armor header and footer
-    --shift                shift the encoded number left as far as possible
-    -s --signature=<file>  verify with a detached signature
-    --twitter              for armor, use the Twitter alphabet
-    --visible              make the encryption recipients visible
+    --alphabet=<str>                the alphabet string to index into when armoring
+    -b --binary                     don't use saltpack armor
+    --base64                        for armor, use the Base64 alphabet and 3-byte blocks
+    --base85                        for armor, use the Base85 alphabet and 4-byte blocks
+    --block=<size>                  the armoring block size
+    --chunk=<size>                  size of payload chunks, default 1 MB
+    -d --detached                   make a detached signature
+    --debug                         debug mode
+    -m --message=<msg>              message text, instead of reading stdin
+    --major-version=<major-version> saltpack major version used for encryption
+    --raw                           omit armor header and footer
+    --shift                         shift the encoded number left as far as possible
+    -s --signature=<file>           verify with a detached signature
+    --twitter                       for armor, use the Twitter alphabet
+    --visible                       make the encryption recipients visible
 '''
 
 FORMAT_VERSION = 1

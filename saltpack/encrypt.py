@@ -32,6 +32,26 @@ def chunks_with_empty(message, chunk_size):
     return chunks
 
 
+def chunks_loop(message, chunk_size, major_version):
+    """Yield chunks"""
+    assert chunk_size > 0
+
+    if not message:
+        yield 0, b'', True
+        return
+
+    chunk_start = 0
+    chunks_count = 0
+
+    while chunk_start < len(message):
+        chunk = message[chunk_start:chunk_start + chunk_size]
+        chunk_start += chunk_size
+        yield chunks_count, chunk, major_version != 1 and chunk_start >= len(message)
+        chunks_count += 1
+
+    if major_version == 1:
+        yield chunks_count, b'', True
+
 def json_repr(obj):
     # We need to repr everything that JSON doesn't directly support,
     # particularly bytes.
@@ -67,8 +87,11 @@ assert len(PAYLOAD_KEY_BOX_NONCE_PREFIX_V2) == 16
 PAYLOAD_NONCE_PREFIX = b"saltpack_ploadsb"
 assert len(PAYLOAD_NONCE_PREFIX) == 16
 
-CURRENT_MAJOR_VERSION = 1
-CURRENT_MINOR_VERSION = 0
+DEFAULT_MAJOR_VERSION = 2
+CURRENT_MINOR_VERSIONS = {1: 0, 2: 0}
+
+CURRENT_MAJOR_VERSION = DEFAULT_MAJOR_VERSION
+CURRENT_MINOR_VERSION = CURRENT_MINOR_VERSIONS[CURRENT_MAJOR_VERSION]
 
 
 def payload_key_nonce(version, recipient_index):
@@ -80,7 +103,7 @@ def payload_key_nonce(version, recipient_index):
 
 
 def encrypt(sender_private, recipient_public_keys, message, chunk_size, *,
-            visible_recipients=False):
+            visible_recipients=False, major_version=None):
     sender_public = nacl.bindings.crypto_scalarmult_base(sender_private)
     ephemeral_private = os.urandom(32)
     ephemeral_public = nacl.bindings.crypto_scalarmult_base(ephemeral_private)
@@ -91,6 +114,9 @@ def encrypt(sender_private, recipient_public_keys, message, chunk_size, *,
         nonce=SENDER_KEY_SECRETBOX_NONCE,
         key=payload_key)
 
+    if major_version is None:
+        major_version = DEFAULT_MAJOR_VERSION
+
     recipient_pairs = []
     for i, recipient_public in enumerate(recipient_public_keys):
         # The recipient box holds the sender's long-term public key and the
@@ -98,7 +124,7 @@ def encrypt(sender_private, recipient_public_keys, message, chunk_size, *,
         # with the ephemeral private key.
         payload_key_box = nacl.bindings.crypto_box(
             message=payload_key,
-            nonce=payload_key_nonce(CURRENT_MAJOR_VERSION, i),
+            nonce=payload_key_nonce(major_version, i),
             pk=recipient_public,
             sk=ephemeral_private)
         # None is for the recipient public key, which is optional.
@@ -111,7 +137,7 @@ def encrypt(sender_private, recipient_public_keys, message, chunk_size, *,
     header = [
         # format name
         "saltpack",  # format name
-        [CURRENT_MAJOR_VERSION, CURRENT_MINOR_VERSION],
+        [major_version, CURRENT_MINOR_VERSIONS[major_version]],
         # mode (encryption)
         0,
         ephemeral_public,
@@ -126,35 +152,66 @@ def encrypt(sender_private, recipient_public_keys, message, chunk_size, *,
 
     # Compute the per-user MAC keys.
     recipient_mac_keys = []
-    mac_keys_nonce = header_hash[:24]
-    for recipient_public in recipient_public_keys:
+    for recipient_index, recipient_public in enumerate(recipient_public_keys):
+        if major_version == 1:
+            mac_nonce_recipient = header_hash[:24]
+        else:
+            mac_key_nonce_base = bytearray(header_hash[:16])
+            mac_key_nonce_base[15] &= 254  # clear the last bit
+            mac_nonce_recipient = bytes(mac_key_nonce_base) + recipient_index.to_bytes(8, "big")
+
         mac_key_box = nacl.bindings.crypto_box(
-            message=b'\0'*32,
-            nonce=mac_keys_nonce,
+            message=b'\0' * 32,
+            nonce=mac_nonce_recipient,
             pk=recipient_public,
             sk=sender_private)
-        mac_key = mac_key_box[16:48]
+
+        if major_version == 1:
+            mac_key = mac_key_box[16:48]
+        else:
+            mac_key_nonce_base = bytearray(header_hash[:16])
+            mac_key_nonce_base[15] |= 1  # set the last bit
+            mac_nonce_recipient = bytes(mac_key_nonce_base) + recipient_index.to_bytes(8, "big")
+
+            mac_key_box2 = nacl.bindings.crypto_box(
+                message=b'\0' * 32,
+                nonce=mac_nonce_recipient,
+                pk=recipient_public,
+                sk=ephemeral_private)
+            mac_key_boxes_tails = mac_key_box[-32:] + mac_key_box2[-32:]
+            mac_key = nacl.bindings.crypto_hash(mac_key_boxes_tails)[:32]
         recipient_mac_keys.append(mac_key)
 
     # Write the chunks.
-    for chunknum, chunk in enumerate(chunks_with_empty(message, chunk_size)):
+    for chunknum, chunk, final_flag in chunks_loop(message, chunk_size, major_version):
         payload_nonce = PAYLOAD_NONCE_PREFIX + chunknum.to_bytes(8, "big")
         payload_secretbox = nacl.bindings.crypto_secretbox(
             message=chunk,
             nonce=payload_nonce,
             key=payload_key)
         # Authenticate the hash of the payload for each recipient.
+        if major_version == 1:
+            final_flag_byte = b""
+        else:
+            final_flag_byte = b"\x01" if final_flag else b"\x00"
         payload_hash = nacl.bindings.crypto_hash(
-            header_hash + payload_nonce + payload_secretbox)
+            header_hash + payload_nonce + final_flag_byte + payload_secretbox)
         hash_authenticators = []
         for mac_key in recipient_mac_keys:
             hmac_digest = hmac.new(mac_key, digestmod=hashlib.sha512)
             hmac_digest.update(payload_hash)
             hash_authenticators.append(hmac_digest.digest()[:32])
-        packet = [
-            hash_authenticators,
-            payload_secretbox,
-        ]
+        if major_version == 1:
+            packet = [
+                hash_authenticators,
+                payload_secretbox,
+            ]
+        else:
+            packet = [
+                final_flag,
+                hash_authenticators,
+                payload_secretbox,
+            ]
         output.write(umsgpack.packb(packet))
 
     return output.getvalue()
@@ -224,7 +281,7 @@ def decrypt(input, recipient_private):
         mac_key_box_sender = nacl.bindings.crypto_box(
             message=b'\0'*32,
             nonce=bytes(mac_key_nonce_base) +
-                    recipient_index.to_bytes(8, "big"),
+                  recipient_index.to_bytes(8, "big"),
             pk=sender_public,
             sk=recipient_private)
         mac_key_nonce_base[15] |= 1  # set the last bit
@@ -326,13 +383,18 @@ def do_encrypt(args):
         chunk_size = int(args['--chunk'])
     else:
         chunk_size = 10**6
+    if args['--major-version']:
+        major_version = int(args['--major-version'])
+    else:
+        major_version = None
     recipients = get_recipients(args)
     output = encrypt(
         sender,
         recipients,
         encoded_message,
         chunk_size,
-        visible_recipients=visible_recipients)
+        visible_recipients=visible_recipients,
+        major_version=major_version)
     if not args['--binary']:
         output = (armor.armor(output, message_type="ENCRYPTED MESSAGE") +
                   '\n').encode()
